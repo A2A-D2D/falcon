@@ -1,4 +1,8 @@
 `timescale 1ns/1ps
+// Module: falconsign_shake256
+// Purpose: SHAKE256 absorb/squeeze wrapper around the iterative Keccak core.
+// It implements Falcon's hash stream interface over 64-bit words.
+//
 
 // SHAKE256 wrapper
 // Rate = 1088 bits = 17 x 64-bit words
@@ -66,6 +70,7 @@ module falconsign_shake256(
 
     falconsign_keccak_core u_keccak(
         .clk(clk),
+        .rst_n(rst_n),
         .start(keccak_start),
         .ready(keccak_ready),
 
@@ -82,6 +87,8 @@ module falconsign_shake256(
         .do20(ko20), .do21(ko21), .do22(ko22), .do23(ko23), .do24(ko24)
     );
 
+    // Ready is high only when the wrapper can accept absorb/squeeze activity;
+    // permutation states stall the caller until Keccak is done.
     always @(*) begin
         case (state)
             ST_IDLE,
@@ -91,6 +98,8 @@ module falconsign_shake256(
         endcase
     end
 
+    // SHAKE256 control FSM. It absorbs 64-bit words with Falcon padding,
+    // launches Keccak permutations, and streams rate words during squeeze.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state             <= ST_IDLE;
@@ -162,7 +171,6 @@ module falconsign_shake256(
                                     // 当前 word 正好填满一个 rate block。
                                     // 先 permute 当前 block，
                                     // 然后再吸收一个 padding-only block。
-                                    pad_empty_pending <= 1'b1;
                                     pad_empty_pending <= 1'b1;
                                     s16 <= s16 ^ din;
                                 end else begin

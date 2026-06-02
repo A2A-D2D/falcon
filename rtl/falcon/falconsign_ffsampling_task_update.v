@@ -1,5 +1,7 @@
 `timescale 1ns/1ps
-// Falcon ffSampling task scheduler.
+// Module: falconsign_ffsampling_task_update
+// Purpose: Falcon ffSampling task scheduler. It walks the dynamic binary
+// ffSampling tree and emits coarse split/sample/adjust/merge tasks.
 //
 // This module turns the recursive ffSampling flow into a stream of 68-bit
 // EXU/SamplerZ tasks. It does not perform floating-point arithmetic itself;
@@ -158,6 +160,7 @@ module falconsign_ffsampling_task_update #
     // Ordinary internal ADJUST/COPY/MERGE operations use this half-size count.
     // The root transition from z1 to t0 is different and is marked explicitly
     // by the root_full bit in pack_adjust_task().
+    // Tree traversal helpers derived from the current logical node.
     always @(*) begin
         case (cfg_depth - level_q)
             4'd9:  component_stride = {{(ADDR_W-8){1'b0}}, 8'd128};
@@ -171,6 +174,7 @@ module falconsign_ffsampling_task_update #
             default: component_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
         endcase
     end
+    // Component and subtree sizing derived from cfg_depth/level.
     always @(*) begin
         case (cfg_depth - (level_q - 1'b1))
             4'd9:  parent_stride = {{(ADDR_W-8){1'b0}}, 8'd128};
@@ -184,6 +188,7 @@ module falconsign_ffsampling_task_update #
             default: parent_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
         endcase
     end
+    // Segment offset calculation for the current ffSampling node.
     always @(*) begin
         case (level_q)
             4'd0: preserve_offset = {ADDR_W{1'b0}};
@@ -197,6 +202,8 @@ module falconsign_ffsampling_task_update #
             default: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd255};
         endcase
     end
+    // Task word packing: selects opcode, source/destination addresses and aux
+    // fields for the next EXU micro-op.
     always @(*) begin
         component_words = {{(ADDR_W-1){1'b0}}, 1'b1} << cfg_depth;
     end
@@ -399,7 +406,7 @@ module falconsign_ffsampling_task_update #
             task_valid = 1'b1;
             case (state_q)
                 ST_RIGHT_DOWN: begin
-                    // Descending into a right branch: split/read this node if
+                    // Descending into a right branch: split this node if
                     // internal, otherwise sample the leaf.
                     if (at_leaf) begin
                         task_opcode_c = OP_SAMPLE_PAIR;
@@ -409,12 +416,6 @@ module falconsign_ffsampling_task_update #
                         task_src0_c   = src0_addr;
                         task_src1_c   = src1_addr;
                         task_dst_c    = dst_addr;
-                        task_aux_c    = 8'h00;
-                    end else if (sub_q == SUB_READ) begin
-                        task_opcode_c = OP_READ_L10;
-                        task_src0_c   = split_src0;
-                        task_src1_c   = split_src1;
-                        task_dst_c    = split_dst;
                         task_aux_c    = 8'h00;
                     end else if (sub_q == SUB_PRESERVE) begin
                         task_opcode_c = OP_COPY;
@@ -465,12 +466,6 @@ module falconsign_ffsampling_task_update #
                         task_src1_c   = src1_addr;
                         task_dst_c    = dst_addr;
                         task_aux_c    = 8'h00;
-                    end else if (sub_q == SUB_READ) begin
-                        task_opcode_c = OP_READ_L10;
-                        task_src0_c   = split_src0;
-                        task_src1_c   = split_src1;
-                        task_dst_c    = split_dst;
-                        task_aux_c    = 8'h00;
                     end else if (sub_q == SUB_PRESERVE) begin
                         task_opcode_c = OP_COPY;
                         task_src0_c   = preserve_src;
@@ -515,13 +510,15 @@ module falconsign_ffsampling_task_update #
         task_word[7:0]   = task_aux_c;
     end
 
+    // Non-recursive ffSampling scheduler FSM. It walks left/right children,
+    // emits stable valid/ready task words, and advances after task_done.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             run_state     <= RUN_IDLE;
             level_q       <= {LEVEL_W{1'b0}};
             index_q       <= {INDEX_W{1'b0}};
             state_q       <= ST_RIGHT_DOWN;
-            sub_q         <= SUB_READ;
+            sub_q         <= SUB_SPLIT;
             bank_q        <= 1'b1;
             root_z1_merged_q <= 1'b0;
             issued_op_q   <= 4'd0;
@@ -559,7 +556,7 @@ module falconsign_ffsampling_task_update #
                             level_q   <= {LEVEL_W{1'b0}};
                             index_q   <= {INDEX_W{1'b0}};
                             state_q   <= ST_RIGHT_DOWN;
-                            sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
+                            sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_SPLIT;
                             bank_q    <= 1'b1;
                             root_z1_merged_q <= 1'b0;
                             busy      <= 1'b1;
@@ -587,12 +584,8 @@ module falconsign_ffsampling_task_update #
                         end else begin
                             if (issued_op_q == OP_DYNAMIC_LDL) begin
                                 // Dynamic LDL only prepares tree data for this
-                                // node; continue with the regular l10 read.
-                                sub_q     <= SUB_READ;
-                                run_state <= RUN_EMIT;
-                            end else if (issued_op_q == OP_READ_L10) begin
-                                // l10 is now staged in EXU-side resources; the
-                                // next task can use it for SPLIT.
+                                // node; continue with SPLIT (tree coefficient
+                                // is read by ADJUST, not needed for SPLIT).
                                 sub_q     <= SUB_SPLIT;
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_SPLIT_T1) begin
@@ -609,7 +602,7 @@ module falconsign_ffsampling_task_update #
                                     level_q   <= child_level;
                                     index_q   <= right_child_index;
                                     state_q   <= ST_RIGHT_DOWN;
-                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
+                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_SPLIT;
                                     run_state <= RUN_EMIT;
                                 end
                             end else if (issued_op_q == OP_COPY) begin
@@ -619,7 +612,7 @@ module falconsign_ffsampling_task_update #
                                 level_q   <= child_level;
                                 index_q   <= right_child_index;
                                 state_q   <= ST_RIGHT_DOWN;
-                                sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
+                                sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_SPLIT;
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_ADJUST_T0) begin
                                 if (outer_root_adjust) begin
@@ -630,7 +623,7 @@ module falconsign_ffsampling_task_update #
                                     level_q   <= {LEVEL_W{1'b0}};
                                     index_q   <= {INDEX_W{1'b0}};
                                     state_q   <= ST_RIGHT_DOWN;
-                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
+                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_SPLIT;
                                     root_z1_merged_q <= 1'b0;
                                 end else begin
                                     // Ordinary adjust completed after the right
@@ -638,7 +631,7 @@ module falconsign_ffsampling_task_update #
                                     level_q   <= child_level;
                                     index_q   <= left_child_index;
                                     state_q   <= ST_LEFT_DOWN;
-                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
+                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_SPLIT;
                                 end
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_SAMPLE_PAIR) begin

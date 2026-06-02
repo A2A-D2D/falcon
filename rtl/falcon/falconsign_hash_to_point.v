@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_hash_to_point
+// Purpose: rejection-sample SHAKE output into N mod-q challenge coefficients.
+//
 // HashToPoint: SHAKE256 output -> polynomial c in Z_q[x], q=12289.
 // Falcon reference rule: consume SHAKE bytes two at a time, form
 // w = (b0 << 8) | b1, accept if w < 5*q (61445), output w mod q.
@@ -23,6 +26,7 @@ module falconsign_hash_to_point #(parameter N=512)(
     reg [15:0] sample;
     reg [15:0] sample_mod;
 
+    // Candidate reduction for the current 16-bit SHAKE sample.
     always @(*) begin
         case (pair_pos)
             2'd0: sample = {word_q[7:0],   word_q[15:8]};
@@ -38,6 +42,8 @@ module falconsign_hash_to_point #(parameter N=512)(
         if (sample_mod >= Q) sample_mod = sample_mod - Q;
     end
 
+    // HashToPoint FSM. It consumes two-byte samples from each SHAKE word,
+    // rejects values >= 5*q, and stores accepted coefficients.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             ready<=1; hash_ready<=0; coeff_valid<=0; coeff<=0;

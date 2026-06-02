@@ -1,7 +1,11 @@
 `timescale 1ns/1ps
+// Module: falconsign_keccak_core
+// Purpose: iterative Keccak-f[1600] permutation core. One round is executed
+// per clock; the SHAKE256 wrapper handles absorb/squeeze padding.
 
 module falconsign_keccak_core(
     input  wire        clk,
+    input  wire        rst_n,
     input  wire        start,
     output reg         ready,
 
@@ -34,13 +38,7 @@ module falconsign_keccak_core(
     integer rho_offset_q;
     reg [63:0] round_const_q;
 
-    initial begin
-        rnd   = 5'd24;
-        ready = 1'b1;
-        for (i = 0; i < 25; i = i + 1)
-            s[i] = 64'd0;
-    end
-
+    // Round constant decode for the current Keccak-f round.
     always @(*) begin
         case (rnd)
             5'd0 : round_const_q = 64'h0000000000000001;
@@ -71,8 +69,15 @@ module falconsign_keccak_core(
         endcase
     end
 
-    always @(posedge clk) begin
-        if (start) begin
+    // Main permutation sequencer. A start pulse loads the 25-lane state; each
+    // active clock performs theta, rho/pi, chi and iota for one round.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rnd   <= 5'd24;
+            ready <= 1'b1;
+            for (i = 0; i < 25; i = i + 1)
+                s[i] <= 64'd0;
+        end else if (start) begin
             s[0]  <= di0;   s[1]  <= di1;   s[2]  <= di2;   s[3]  <= di3;   s[4]  <= di4;
             s[5]  <= di5;   s[6]  <= di6;   s[7]  <= di7;   s[8]  <= di8;   s[9]  <= di9;
             s[10] <= di10;  s[11] <= di11;  s[12] <= di12;  s[13] <= di13;  s[14] <= di14;
@@ -144,6 +149,7 @@ module falconsign_keccak_core(
         end
     end
 
+    // Drive the 25 output lanes directly from the registered permutation state.
     always @(*) begin
         do0  = s[0];   do1  = s[1];   do2  = s[2];   do3  = s[3];   do4  = s[4];
         do5  = s[5];   do6  = s[6];   do7  = s[7];   do8  = s[8];   do9  = s[9];

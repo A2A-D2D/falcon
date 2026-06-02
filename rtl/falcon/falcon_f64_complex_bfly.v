@@ -1,4 +1,8 @@
 `timescale 1ns/1ps
+// Module: falcon_f64_complex_bfly
+// Purpose: one complex FFT butterfly over f64 values. It computes
+// y0 = a + b*w and y1 = a - b*w through a sequenced FMA datapath.
+
 module falcon_f64_complex_bfly (
     input         clk,
     input         rst_n,
@@ -64,7 +68,8 @@ module falcon_f64_complex_bfly (
     assign in_ready = (state == ST_IDLE);
     assign busy     = (state != ST_IDLE);
 
-    // Use FMA forms to collapse the complex butterfly datapath onto the shared FPU.
+    // Combinational FPU command decoder. The sequential FSM below owns state
+    // advancement; this block only selects the operation for the current phase.
     always @(*) begin
         fpu_req_valid = 1'b0;
         fpu_req_op    = OP_FMADD;
@@ -182,6 +187,8 @@ module falcon_f64_complex_bfly (
         .busy        ()
     );
 
+    // Butterfly FSM. It latches one input tuple, runs the eight FMA phases, and
+    // holds the four output components valid until the caller accepts them.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= ST_IDLE;

@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_ntt_bfly
+// Purpose: pipelined modular butterfly for q=12289 NTT arithmetic.
+//
 // NTT butterfly with Barrett modular reduction (q = 12289).
 // 2-stage pipeline: stage0 = b*w Barrett reduce, stage1 = a +/- t mod q.
 // y0 = (a + b*w) mod q,  y1 = (a - b*w) mod q
@@ -44,6 +47,8 @@ module falconsign_ntt_bfly (
 
     assign in_ready = 1'b1;
 
+    // Two-stage butterfly pipeline: stage0 registers a and reduced b*w;
+    // stage1 emits modular sum/difference.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             s0_valid  <= 1'b0;

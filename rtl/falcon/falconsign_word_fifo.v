@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_word_fifo
+// Purpose: small synchronous FIFO for 64-bit SHAKE/RNG stream words.
+//
 
 module falconsign_word_fifo #(
     parameter WIDTH  = 64,
@@ -29,6 +32,8 @@ module falconsign_word_fifo #(
     assign rd_valid = (count != {ADDR_W+1{1'b0}});
     assign rd_data  = mem[rd_ptr];
 
+    // Synchronous FIFO pointers and storage. Writes and reads may occur in the
+    // same cycle when both sides are ready.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wr_ptr <= {ADDR_W{1'b0}};

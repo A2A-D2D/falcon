@@ -1,4 +1,8 @@
 `timescale 1ns/1ps
+// Module: falcon_f64_mul
+// Purpose: combinational IEEE-754 double-precision multiplier for Falcon f64
+// datapaths.
+
 module falcon_f64_mul (
     input      [63:0] a,
     input      [63:0] b,
@@ -35,6 +39,8 @@ module falcon_f64_mul (
     reg        round_up;
     integer    exp_res;
 
+    // Combinational f64 multiply datapath: unpack, multiply mantissas,
+    // normalize, round-to-nearest-even, and repack.
     always @(*) begin
         sign_a = a[63];
         sign_b = b[63];

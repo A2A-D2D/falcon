@@ -259,8 +259,8 @@ module tb_falcon_f64_ffsampling_exu;
         issue_task(pack_task(OP_SPLIT, 4'd8, 14'd0, 14'd0, 14'd10));
         issue_task(pack_task(OP_MERGE, 4'd8, 14'd10, 14'd0, 14'd20));
 
+        // Scalar MERGE at level 8 produces one output (reconstructed complex)
         expect_word(6'd20, mem[0]);
-        expect_word(6'd21, mem[1]);
 
         mem[5] = {128'd0, 64'd0, 64'h3FF0000000000000}; // l10 = 1.0 + j0
         mem[8] = {128'd0, 64'h4034000000000000, 64'h4024000000000000}; // t0 = 10 + j20

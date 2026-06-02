@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_gm_rom
+// Purpose: Falcon GM table ROM: split/merge twiddle factors for ffSampling EXU.
+//
 // Falcon GM Table ROM — split/merge twiddle factors for ffSampling EXU.
 //
 // Stores the official Falcon gm_tab values needed by poly_split_fft and
@@ -34,6 +37,8 @@ module falconsign_gm_rom #(
     reg [63:0] rom_re [0:DEPTH-1];
     reg [63:0] rom_im [0:DEPTH-1];
 
+    // Simulation/FPGA ROM initialization. Vivado maps this memory to ROM/BRAM
+    // when the hex files are available during synthesis or implementation.
     initial begin
         $readmemh("DOC/gm_rom_re.hex", rom_re);
         $readmemh("DOC/gm_rom_im.hex", rom_im);

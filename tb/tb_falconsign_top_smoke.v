@@ -62,7 +62,8 @@ module tb_falconsign_top_smoke;
     wire        fail;
     wire [7:0]  status;
 
-    falconsign_top #(.ADDR_W(13), .LEVEL_W(4), .INDEX_W(10)) dut (
+    // Use 2-BFU mode with twiddle reuse optimization
+    falconsign_top #(.ADDR_W(13), .LEVEL_W(4), .INDEX_W(10), .BFU_LANES(2)) dut (
         .clk(clk), .rst_n(rst_n),
         .bus_cs(bus_cs), .bus_wr(bus_wr),
         .bus_addr(bus_addr), .bus_wdata(bus_wdata),
@@ -85,16 +86,17 @@ module tb_falconsign_top_smoke;
             4'd1: phase_name = "SH_SeedHash";
             4'd2: phase_name = "HP_HashToPoint";
             4'd3: phase_name = "FC_FFT";
-            4'd4: phase_name = "FS_ffSampling";
-            4'd5: phase_name = "VD_BhatMul";
-            4'd6: phase_name = "IV_IFFT";
-            4'd7: phase_name = "FI_FprToInt";
-            4'd8: phase_name = "N1_NTT";
-            4'd9: phase_name = "RC_RejCheck";
-            4'd10: phase_name = "CN_Compress";
-            4'd11: phase_name = "EN_Encode";
-            4'd12: phase_name = "OU_Output";
-            4'd13: phase_name = "SD_SendDone";
+            4'd4: phase_name = "TG_TargetGen";
+            4'd5: phase_name = "FS_ffSampling";
+            4'd6: phase_name = "VD_BhatMul";
+            4'd7: phase_name = "IV_IFFT";
+            4'd8: phase_name = "FI_FprToInt";
+            4'd9: phase_name = "N1_NTT";
+            4'd10: phase_name = "RC_RejCheck";
+            4'd11: phase_name = "CN_Compress";
+            4'd12: phase_name = "EN_Encode";
+            4'd13: phase_name = "OU_Output";
+            4'd14: phase_name = "SD_SendDone";
             default: phase_name = "UNKNOWN";
         endcase
     endfunction
@@ -108,6 +110,51 @@ module tb_falconsign_top_smoke;
                 2: peek_mem_word = dut.u_mem.bank2[word_addr >> 2];
                 default: peek_mem_word = dut.u_mem.bank3[word_addr >> 2];
             endcase
+        end
+    endfunction
+
+    function [63:0] norm_signed_i16_span;
+        input integer base_addr;
+        input integer words;
+        integer wi, li;
+        reg [255:0] word;
+        reg signed [15:0] lane;
+        reg [15:0] abs_lane;
+        begin
+            norm_signed_i16_span = 64'd0;
+            for (wi = 0; wi < words; wi = wi + 1) begin
+                word = peek_mem_word(base_addr + wi);
+                for (li = 0; li < 16; li = li + 1) begin
+                    lane = word[li*16 +: 16];
+                    abs_lane = lane[15] ? (~lane + 1'b1) : lane;
+                    norm_signed_i16_span = norm_signed_i16_span +
+                        {{32{1'b0}}, abs_lane} * {{32{1'b0}}, abs_lane};
+                end
+            end
+        end
+    endfunction
+
+    function [63:0] norm_modq_i16_span;
+        input integer base_addr;
+        input integer words;
+        integer wi, li;
+        reg [255:0] word;
+        reg [15:0] lane_u;
+        reg signed [15:0] lane_c;
+        reg [15:0] abs_lane;
+        begin
+            norm_modq_i16_span = 64'd0;
+            for (wi = 0; wi < words; wi = wi + 1) begin
+                word = peek_mem_word(base_addr + wi);
+                for (li = 0; li < 16; li = li + 1) begin
+                    lane_u = word[li*16 +: 16];
+                    lane_c = (lane_u > 16'd6144) ? ($signed({1'b0, lane_u}) - 16'sd12289) :
+                                                   $signed({1'b0, lane_u});
+                    abs_lane = lane_c[15] ? (~lane_c + 1'b1) : lane_c;
+                    norm_modq_i16_span = norm_modq_i16_span +
+                        {{32{1'b0}}, abs_lane} * {{32{1'b0}}, abs_lane};
+                end
+            end
         end
     endfunction
 
@@ -198,7 +245,10 @@ module tb_falconsign_top_smoke;
     endtask
 
     // ─── Phase + sampler tracker ───
-    reg [3:0]  prev_st;
+    // Use dut.sn (combinational next-state) to detect transitions early.
+    // dut.st is a register updated by st <= sn on the same posedge clk,
+    // creating a race condition with NBA semantics. Reading sn avoids this.
+    reg [3:0]  cur_st;
     reg [31:0] total_cycle;
     reg [31:0] restart_cnt;
     reg [31:0] sample_cmds;
@@ -208,7 +258,7 @@ module tb_falconsign_top_smoke;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            prev_st <= 0; total_cycle <= 0; restart_cnt <= 0;
+            cur_st <= 0; total_cycle <= 0; restart_cnt <= 0;
             sample_cmds <= 0; sample_rsps <= 0; ph_start <= 0;
             {ph_cycles[0],ph_cycles[1],ph_cycles[2],ph_cycles[3],
              ph_cycles[4],ph_cycles[5],ph_cycles[6],ph_cycles[7],
@@ -218,11 +268,13 @@ module tb_falconsign_top_smoke;
             total_cycle <= total_cycle + 1;
             if (dut.fe_sz_cmd_valid && dut.fe_sz_cmd_ready) sample_cmds <= sample_cmds + 1;
             if (dut.sz_rsp_valid) sample_rsps <= sample_rsps + 1;
-            if (dut.st != prev_st) begin
-                ph_cycles[prev_st] <= total_cycle - ph_start;
-                prev_st <= dut.st;
+            // Detect transition using sn (combinational) to avoid NBA race.
+            // When sn != st, a state change will happen on this clock edge.
+            if (dut.sn != cur_st) begin
+                ph_cycles[cur_st] <= total_cycle - ph_start;
+                cur_st <= dut.sn;
                 ph_start <= total_cycle;
-                if (dut.st == 4'd1 && (prev_st == 4'd9 || prev_st == 4'd7 || prev_st == 4'd5))
+                if (dut.sn == 4'd1 && (cur_st == 4'd9 || cur_st == 4'd7 || cur_st == 4'd5))
                     restart_cnt <= restart_cnt + 1;
             end
         end
@@ -231,22 +283,26 @@ module tb_falconsign_top_smoke;
     // ─── Main test ───
     reg [31:0] sr, cfg_val, case_sel, timeout_cyc;
     reg [1023:0] case_desc;
+    reg [63:0] dbg_norm_s2, dbg_norm_s1;
     integer    i, cyc;
+    reg        progress_en;
 
     initial begin
         bus_cs = 0; bus_wr = 0; bus_addr = 0; bus_wdata = 0;
-        case_sel = 0;
+        progress_en = $test$plusargs("PROGRESS");
+        case_sel = 1;  // Default: full pipeline (CASE=1)
 
         repeat (8) @(posedge clk);
         rst_n = 1'b1;
         repeat (4) @(posedge clk);
 
-        if ($test$plusargs("CASE=1")) case_sel = 1;
+        if ($test$plusargs("CASE=0")) case_sel = 0;
         else if ($test$plusargs("CASE=2")) case_sel = 2;
 
         // ═══════════════════════════════════════════════════════
         // Case configuration
         // All cases use real ffSampling — no BYPASS_FS.
+        // Default: CASE=1 (full hardware pipeline)
         // ═══════════════════════════════════════════════════════
         case (case_sel)
             0: begin
@@ -254,7 +310,7 @@ module tb_falconsign_top_smoke;
                 // Full real signing chain: FS→VD→IV→FI→N1→RC
                 // Uses preloaded key material (t0/t1/tree/B/h from software).
                 // MAX_RESTARTS=3, so up to 4 signing attempts.
-                case_desc = "START_AT_FS + real rejection (FS→VD→IV→FI→N1→RC)";
+                case_desc = "START_AT_FS + real rejection (FS→VD→IV→FI→N1→RC) [SW t0/t1]";
                 cfg_val = 32'h00000004;  // start_at_fs=1, force_accept=0, bypass_fs=0
                 timeout_cyc = 25000000;  // up to 4 attempts × ~500K
             end
@@ -262,7 +318,7 @@ module tb_falconsign_top_smoke;
                 // FULL PIPELINE + force_accept
                 // Hardware does everything: SH→HP→FC→FS→VD→IV→FI→N1→RC(forced)
                 // t0/t1 generated internally via HashToPoint→FFT.
-                case_desc = "FULL PIPELINE + force_accept (SH→HP→FC→FS→VD→IV→FI→N1)";
+                case_desc = "FULL PIPELINE + force_accept (SH→HP→FC→FS→VD→IV→FI→N1) [FULL HW]";
                 cfg_val = 32'h00000002;  // force_accept=1, all else 0
                 timeout_cyc = 25000000;  // full pipeline ~500K cycles
             end
@@ -270,13 +326,13 @@ module tb_falconsign_top_smoke;
                 // START_AT_FS + force_accept — fastest real-ffSampling path
                 // FS→VD→IV→FI→N1→RC(forced)
                 // Preloaded t0/t1, skips rejection. Good for ffSampling debug.
-                case_desc = "START_AT_FS + force_accept (FS→VD→IV→FI→N1, preloaded key)";
+                case_desc = "START_AT_FS + force_accept (FS→VD→IV→FI→N1, preloaded key) [SW t0/t1]";
                 cfg_val = 32'h00000006;  // start_at_fs=1, force_accept=1
                 timeout_cyc = 10000000;  // ~473K cycles
             end
             default: begin
-                case_desc = "DEFAULT";
-                cfg_val = 32'h00000004;
+                case_desc = "DEFAULT (FULL HW)";
+                cfg_val = 32'h00000002;
                 timeout_cyc = 25000000;
             end
         endcase
@@ -322,6 +378,14 @@ module tb_falconsign_top_smoke;
         while (!done && !fail && cyc < timeout_cyc) begin
             @(posedge clk);
             cyc = cyc + 1;
+            if (progress_en && ((cyc % 100000) == 0)) begin
+                $display("PROGRESS case=%0d cyc=%0d phase=%s st=%0d sn=%0d salt=%0d restarts=%0d norm_accept=%0d norm_sq=%0d fft_state=%0d fft_stage=%0d fft_pair=%0d fft_fal_idx=%0d fft_busy=%0d fft_rsp_done=%0d",
+                    case_sel, cyc, phase_name(dut.st), dut.st, dut.sn,
+                    dut.salt_cnt, restart_cnt, dut.norm_accept, dut.norm_sq,
+                    dut.u_fft.state, dut.u_fft.stage_idx, dut.u_fft.pair_idx,
+                    dut.u_fft.fal_idx, dut.fft_busy, dut.fft_rsp_done);
+                $fflush;
+            end
         end
 
         // ─── Report ───
@@ -339,18 +403,24 @@ module tb_falconsign_top_smoke;
         $display("║    SH_SeedHash:     %6d cy", ph_cycles[1]);
         $display("║    HP_HashToPoint:  %6d cy", ph_cycles[2]);
         $display("║    FC_FFT:          %6d cy", ph_cycles[3]);
-        $display("║    FS_ffSampling:   %6d cy", ph_cycles[4]);
-        $display("║    VD_BhatMul:      %6d cy", ph_cycles[5]);
-        $display("║    IV_IFFT:         %6d cy", ph_cycles[6]);
-        $display("║    FI_FprToInt:     %6d cy", ph_cycles[7]);
-        $display("║    N1_NTT:          %6d cy", ph_cycles[8]);
-        $display("║    RC_RejCheck:     %6d cy", ph_cycles[9]);
+        $display("║    TG_TargetGen:    %6d cy", ph_cycles[4]);
+        $display("║    FS_ffSampling:   %6d cy", ph_cycles[5]);
+        $display("║    VD_BhatMul:      %6d cy", ph_cycles[6]);
+        $display("║    IV_IFFT:         %6d cy", ph_cycles[7]);
+        $display("║    FI_FprToInt:     %6d cy", ph_cycles[8]);
+        $display("║    N1_NTT:          %6d cy", ph_cycles[9]);
+        $display("║    RC_RejCheck:     %6d cy", ph_cycles[10]);
         $display("╠══════════════════════════════════════════════════════╣");
         $display("║  SamplerZ: busy=%0d done=%0d fail=%0d",
             dut.sz_busy, dut.sz_done, dut.sz_fail);
         $display("║  Norm:    accept=%0d norm_sq=%0d bound=%0d",
             dut.norm_accept, dut.norm_sq, dut.FALCON512_BOUND_SQ);
         $display("╚══════════════════════════════════════════════════════╝");
+
+        dbg_norm_s2 = norm_signed_i16_span(LAYOUT_SIG_BASE, 32);
+        dbg_norm_s1 = norm_modq_i16_span(LAYOUT_S1_BASE, 32);
+        $display("    Norm split: s2=%0d  s1=%0d  sum=%0d",
+            dbg_norm_s2, dbg_norm_s1, dbg_norm_s2 + dbg_norm_s1);
 
         // Signature output
         $display("");

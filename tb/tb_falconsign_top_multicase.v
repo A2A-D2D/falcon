@@ -75,16 +75,17 @@ module tb_falconsign_top_multicase;
             4'd1: phase_name = "SH_SeedHash";
             4'd2: phase_name = "HP_HashToPoint";
             4'd3: phase_name = "FC_FFT";
-            4'd4: phase_name = "FS_ffSampling";
-            4'd5: phase_name = "VD_BhatMul";
-            4'd6: phase_name = "IV_IFFT";
-            4'd7: phase_name = "FI_FprToInt";
-            4'd8: phase_name = "N1_NTT";
-            4'd9: phase_name = "RC_RejCheck";
-            4'd10: phase_name = "CN_Compress";
-            4'd11: phase_name = "EN_Encode";
-            4'd12: phase_name = "OU_Output";
-            4'd13: phase_name = "SD_SendDone";
+            4'd4: phase_name = "TG_TargetGen";
+            4'd5: phase_name = "FS_ffSampling";
+            4'd6: phase_name = "VD_BhatMul";
+            4'd7: phase_name = "IV_IFFT";
+            4'd8: phase_name = "FI_FprToInt";
+            4'd9: phase_name = "N1_NTT";
+            4'd10: phase_name = "RC_RejCheck";
+            4'd11: phase_name = "CN_Compress";
+            4'd12: phase_name = "EN_Encode";
+            4'd13: phase_name = "OU_Output";
+            4'd14: phase_name = "SD_SendDone";
             default: phase_name = "UNKNOWN";
         endcase
     endfunction

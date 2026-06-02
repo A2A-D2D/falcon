@@ -43,10 +43,13 @@ venv/
 *.vvp
 *.fst
 *.ghw
+tb/DOC/gm_tab_*.hex
 
 # Local backup snapshots
 backup_*/
 backup*/
+rtl/falcon/archive_unused/
+rtl/falcon/dv*/
 
 # Local CodeGraph index
 .codegraph/

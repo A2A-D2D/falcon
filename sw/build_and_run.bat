@@ -84,6 +84,7 @@ echo   t0_target.hex, t1_target.hex
 echo   b00.hex, b01.hex, b10.hex, b11.hex
 echo     ^(B and target FFT data are full 512-word Hermitian expansions^)
 echo   tree_full_poly.hex, tree_full_poly.map, h_ntt.hex, hm.hex
+echo   t0_target_nonce40.hex, t1_target_nonce40.hex
 echo Reference/debug files:
 echo   b00_official.hex, b01_official.hex, b10_official.hex, b11_official.hex
 echo   tree.hex, tree_official_fpr.hex, hm_nonce40.hex

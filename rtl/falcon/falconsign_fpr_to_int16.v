@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_fpr_to_int16
+// Purpose: convert f64 signature-domain coefficients into packed signed int16
+// words for the integer NTT and norm-check path.
 
 module falconsign_fpr_to_int16 #(
     parameter ADDR_W = 11
@@ -38,6 +41,7 @@ module falconsign_fpr_to_int16 #(
     reg last_coeff_q;
 
     reg signed [15:0] coeff_i16;
+    reg [63:0] coeff_f64;
     reg [63:0] f64_neg_v;
     reg        conv_sign;
     reg [10:0] conv_exp;
@@ -54,9 +58,11 @@ module falconsign_fpr_to_int16 #(
 
     assign start_ready = (state == ST_IDLE);
 
+    // Combinational f64-to-int16 conversion with round-to-nearest behavior.
     always @(*) begin
-        f64_neg_v = (mem_rd_data[62:0] == 63'd0) ? mem_rd_data[63:0]
-                  : {~mem_rd_data[63], mem_rd_data[62:0]};
+        coeff_f64 = coeff_idx[0] ? mem_rd_data[191:128] : mem_rd_data[63:0];
+        f64_neg_v = (coeff_f64[62:0] == 63'd0) ? coeff_f64
+                  : {~coeff_f64[63], coeff_f64[62:0]};
         conv_sign = f64_neg_v[63];
         conv_exp  = f64_neg_v[62:52];
         conv_frac = f64_neg_v[51:0];
@@ -104,9 +110,11 @@ module falconsign_fpr_to_int16 #(
             coeff_i16 = conv_rounded[15:0];
     end
 
+    // Memory write-word assembler: places the current converted lane into the
+    // packed 16-lane output word.
     always @(*) begin
         mem_rd_en   = 1'b0;
-        mem_rd_addr = src_base + coeff_idx;
+        mem_rd_addr = src_base + {1'b0, coeff_idx[ADDR_W-1:1]};
         mem_wr_en   = 1'b0;
         mem_wr_addr = dst_base + word_idx;
         mem_wr_data = pack_word;
@@ -120,6 +128,8 @@ module falconsign_fpr_to_int16 #(
         end
     end
 
+    // Conversion FSM. It reads f64 coefficients, converts one lane at a time,
+    // packs 16 int16 values, and writes one 256-bit word.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state        <= ST_IDLE;

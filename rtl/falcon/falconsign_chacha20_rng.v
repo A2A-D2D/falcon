@@ -1,4 +1,8 @@
 `timescale 1ns/1ps
+// Module: falconsign_chacha20_rng
+// Purpose: deterministic ChaCha20 block generator used as the signer random
+// source for SamplerZ.
+
 
 module falconsign_chacha20_rng #(
     parameter KEY_W   = 256,
@@ -42,6 +46,8 @@ module falconsign_chacha20_rng #(
     assign seed_ready = (state == S_IDLE);
     assign busy       = (state != S_IDLE) && (state != S_DONE);
 
+    // One ChaCha double-round combinational datapath. The sequential FSM
+    // latches dr_result after each double-round.
     always @(*) begin
         dr_x0 = st[0];   dr_x1 = st[1];   dr_x2 = st[2];   dr_x3 = st[3];
         dr_x4 = st[4];   dr_x5 = st[5];   dr_x6 = st[6];   dr_x7 = st[7];
@@ -92,6 +98,8 @@ module falconsign_chacha20_rng #(
                      dr_x8, dr_x9, dr_x10, dr_x11, dr_x12, dr_x13, dr_x14, dr_x15};
     end
 
+    // RNG FSM: load seed/nonce, run 10 double-rounds, add the original state,
+    // and expose one 512-bit block per request.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state       <= S_IDLE;
@@ -194,6 +202,7 @@ module falconsign_chacha20_rng #(
         end
     end
 
+    // Output byte-order packing for the generated ChaCha block.
     always @(*) begin
         state_next = state;
         case (state)

@@ -1,4 +1,8 @@
 `timescale 1ns/1ps
+// Module: falcon_fp_fpu
+// Purpose: small request/response floating-point execution unit. It wraps the
+// local f64 add/mul helpers and sequences FMADD/FMSUB-style operations.
+
 
 module falcon_fp_fpu (
     input         clk,
@@ -82,6 +86,7 @@ module falcon_fp_fpu (
     reg [51:0] fcvt_frac;
     integer    fcvt_ii;
     integer    fcvt_pos;
+    reg        fcvt_found;
 
     assign req_ready  = (state == ST_IDLE);
     assign rsp_valid  = (state == ST_HOLD);
@@ -112,6 +117,9 @@ module falcon_fp_fpu (
         .inexact   (mul_inexact)
     );
 
+    // Operand mux for the internal add and multiply helpers. Multi-cycle
+    // operations reuse the helpers in EXEC0/EXEC1 rather than instantiating
+    // separate hardware for each FPU opcode.
     always @(*) begin
         add_a   = 64'd0;
         add_b   = 64'd0;
@@ -174,6 +182,8 @@ module falcon_fp_fpu (
         endcase
     end
 
+    // Request/response FSM. A request is latched in IDLE, one or two execute
+    // cycles produce the result, and HOLD preserves it until rsp_ready.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state      <= ST_IDLE;
@@ -280,10 +290,11 @@ module falcon_fp_fpu (
                                 fcvt_abs_val = fcvt_neg ? (~a_q + 1'b1) : a_q;
                                 // find position of leading 1
                                 fcvt_pos = 63;
+                                fcvt_found = 1'b0;
                                 for (fcvt_ii = 0; fcvt_ii < 64; fcvt_ii = fcvt_ii + 1) begin
-                                    if (fcvt_abs_val[63 - fcvt_ii]) begin
+                                    if (fcvt_abs_val[63 - fcvt_ii] && !fcvt_found) begin
                                         fcvt_pos = 63 - fcvt_ii;
-                                        fcvt_ii = 64;
+                                        fcvt_found = 1'b1;
                                     end
                                 end
                                 fcvt_exp = 11'd1023 + fcvt_pos;

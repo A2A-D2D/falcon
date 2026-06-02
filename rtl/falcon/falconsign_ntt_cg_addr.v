@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_ntt_cg_addr
+// Purpose: address generator for the constant-geometry NTT schedule.
+//
 // Stockham Constant-Geometry NTT address generator.
 // Produces natural-order coefficient pairs — no bit-reversal needed.
 module falconsign_ntt_cg_addr #(

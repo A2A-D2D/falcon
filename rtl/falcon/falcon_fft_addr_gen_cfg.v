@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falcon_fft_addr_gen_cfg
+// Purpose: combinational address generator for one FFT butterfly pair.
+
 module falcon_fft_addr_gen_cfg #
 (
     parameter ADDR_W = 10
@@ -19,6 +22,7 @@ module falcon_fft_addr_gen_cfg #
     reg [ADDR_W:0] base_idx;
     reg [4:0]      shift_amt;
 
+    // Pure combinational address calculation for one butterfly pair.
     always @(*) begin
         half_m = ({(ADDR_W){1'b0}} | 1'b1) << stage_idx;
         m_size = half_m << 1;

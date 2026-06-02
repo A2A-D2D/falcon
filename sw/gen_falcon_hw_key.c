@@ -615,6 +615,22 @@ int main(void) {
     write_fft_poly_rtl_hex("t1_target.hex", target_t1, n,
                            "official sign_tree target t1 for RTL preload");
 
+    for (size_t u = 0; u < n; u++) {
+        target_t0[u] = fpr_of(hm_nonce40[u]);
+    }
+    Zf(FFT)(target_t0, logn);
+    write_fft_poly_rtl_hex("c_fft_nonce40.hex", target_t0, n,
+                           "standard zero-nonce FFT(c) before target multiply");
+    memcpy(target_t1, target_t0, n * sizeof(*target_t0));
+    Zf(poly_mul_fft)(target_t1, b01, logn);
+    Zf(poly_mulconst)(target_t1, fpr_neg(fpr_inverse_of_q), logn);
+    Zf(poly_mul_fft)(target_t0, b11, logn);
+    Zf(poly_mulconst)(target_t0, fpr_inverse_of_q, logn);
+    write_fft_poly_rtl_hex("t0_target_nonce40.hex", target_t0, n,
+                           "standard zero-nonce target t0 for RTL preload");
+    write_fft_poly_rtl_hex("t1_target_nonce40.hex", target_t1, n,
+                           "standard zero-nonce target t1 for RTL preload");
+
     /* ─── Step 5: Compute expected signature (for cross-check) ─── */
     /* We also run the full signing to get expected s2 */
     inner_shake256_context rng_sc;
@@ -684,6 +700,7 @@ int main(void) {
     printf("  h_ntt.hex                            - public key (NTT+Montgomery, 32 words)\n");
     printf("  hm.hex, hm_nonce40.hex               - challenge c variants (32 words each)\n");
     printf("  t0_target.hex, t1_target.hex         - official preimage-center targets\n");
+    printf("  t0_target_nonce40.hex, t1_target_nonce40.hex - zero-nonce standard targets\n");
     printf("  s1_expected.hex, s2_expected.hex     - expected signature (software reference)\n");
     printf("  expanded_key.bin                     - raw binary dump\n");
 

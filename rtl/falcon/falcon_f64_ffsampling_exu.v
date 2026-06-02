@@ -41,7 +41,23 @@ module falcon_f64_ffsampling_exu #(parameter ADDR_W=10)(
     output reg         sz_cmd_pair,
     input  wire        sz_rsp_valid,
     input  wire [63:0] sz_rsp_z0,
-    input  wire [63:0] sz_rsp_z1
+    input  wire [63:0] sz_rsp_z1,
+
+    // External shared FPU lane ports (for SPLIT/MERGE via falconsign_shared_fpu_lanes)
+    output reg              fe_fpu_req_v,
+    input  wire             fe_fpu_req_r,
+    output reg  [2:0]       fe_fpu_mode,
+    output reg  [63:0]      fe_fpu_a0_re, fe_fpu_a0_im,
+    output reg  [63:0]      fe_fpu_b0_re, fe_fpu_b0_im,
+    output reg  [63:0]      fe_fpu_a1_re, fe_fpu_a1_im,
+    output reg  [63:0]      fe_fpu_b1_re, fe_fpu_b1_im,
+    output reg  [63:0]      fe_fpu_w_re, fe_fpu_w_im,
+    output reg  [63:0]      fe_fpu_w1_re, fe_fpu_w1_im,
+    input  wire             fe_fpu_rsp_v,
+    input  wire [63:0]      fe_fpu_y0_re, fe_fpu_y0_im,
+    input  wire [63:0]      fe_fpu_y1_re, fe_fpu_y1_im,
+    input  wire [63:0]      fe_fpu_y0_re_1, fe_fpu_y0_im_1,
+    input  wire [63:0]      fe_fpu_y1_re_1, fe_fpu_y1_im_1
 );
 
 localparam [3:0] OP_READ_L10 = 4'd0;
@@ -128,6 +144,11 @@ reg [ADDR_W-1:0] split_words_q;
 reg [63:0] split_re_buf [0:255];
 reg [63:0] split_im_buf [0:255];
 
+// ─── Shared FPU lane request logic ───
+// TODO: SPLIT/MERGE via shared FPU lanes requires proper IEEE 754 preprocessing
+// (bit-level add/sub doesn't work for mixed-sign floats). Disabled for now.
+wire use_shared_fpu = 1'b0;  // Always use internal FPU for now
+
 `ifndef SYNTHESIS
 reg debug_adjust_nop;
 reg debug_trace_exu;
@@ -143,7 +164,86 @@ wire [ADDR_W-1:0] merge_mirror_base = dst_q + (pair_limit_q << 2) - 1'b1;
 wire [ADDR_W-1:0] merge_mirror_addr0 = merge_mirror_base - (idx_q << 1);
 wire [ADDR_W-1:0] merge_mirror_addr1 = merge_mirror_base - ((idx_q << 1) + 1'b1);
 wire [ADDR_W-1:0] merge_buf_index = pair_limit_q + idx_q;
-reg [ADDR_W-1:0] twiddle_base_c;
+
+function [ADDR_W-1:0] pair_count_from_level;
+    input [3:0] level;
+    begin
+        if (level >= 4'd8) begin
+            pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
+        end else begin
+            pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - level);
+        end
+    end
+endfunction
+
+function [ADDR_W-1:0] word_count_from_level;
+    input [3:0] level;
+    begin
+        if (level >= 4'd8) begin
+            word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
+        end else begin
+            word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
+        end
+    end
+endfunction
+
+function [ADDR_W-1:0] raw_word_count_from_level;
+    input [3:0] level;
+    begin
+        if (level >= 4'd8) begin
+            raw_word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
+        end else begin
+            raw_word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
+        end
+    end
+endfunction
+
+function [63:0] f64_half;
+    input [63:0] v;
+    begin
+        f64_half = (v[62:52] == 11'd0) ? v : {v[63], v[62:52] - 1'b1, v[51:0]};
+    end
+endfunction
+
+function [63:0] f64_neg;
+    input [63:0] v;
+    begin
+        f64_neg = (v[62:0] == 63'd0) ? v : {~v[63], v[62:0]};
+    end
+endfunction
+
+function [ADDR_W-1:0] twiddle_index;
+    input [ADDR_W-1:0] idx;
+    input [3:0] level;
+    reg [ADDR_W-1:0] base;
+    begin
+        // GM ROM address mapping: base[L] = 256 - 2^(8-L)
+        // Level 0: 0, L1: 128, L2: 192, L3: 224, L4: 240,
+        // L5: 248, L6: 252, L7: 254
+        if (level >= 4'd8) begin
+            twiddle_index = {{(ADDR_W-1){1'b0}}, 1'b1};
+        end else begin
+            base = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
+            twiddle_index = 256 - base + idx;
+        end
+    end
+endfunction
+
+// ─── Internal dedicated FPU (avoids shared-FPU contention with SamplerZ) ───
+reg         ife_req_valid;
+wire        ife_req_ready;
+reg  [3:0]  ife_req_op;
+reg  [63:0] ife_req_a, ife_req_b, ife_req_c;
+wire        ife_rsp_valid;
+wire [63:0] ife_rsp_result;
+
+falcon_fp_fpu u_ife_fpu (
+    .clk,.rst_n,
+    .req_valid(ife_req_valid),.req_ready(ife_req_ready),
+    .req_op(ife_req_op),.req_a(ife_req_a),.req_b(ife_req_b),.req_c(ife_req_c),
+    .req_fmt(2'd1),.req_rm(3'd0),.req_fcvt_op(2'd0),
+    .rsp_valid(ife_rsp_valid),.rsp_ready(1'b1),
+    .rsp_result(ife_rsp_result),.rsp_flags(),.busy());
 
 always @(*) begin
     task_ready       = (state == ST_IDLE);
@@ -152,18 +252,22 @@ always @(*) begin
     mem_wr_en        = 1'b0;
     mem_wr_addr      = {ADDR_W{1'b0}};
     mem_wr_data      = 256'd0;
-    if (level_q >= 4'd8) begin
-        twiddle_base_c = {{(ADDR_W-1){1'b0}}, 1'b1};
-        twiddle_addr   = twiddle_base_c;
-    end else begin
-        twiddle_base_c = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level_q);
-        twiddle_addr   = {{(ADDR_W-9){1'b0}}, 9'd256} - twiddle_base_c + idx_q;
-    end
+    twiddle_addr     = twiddle_index(idx_q, level_q);
     fpu_req_valid    = 1'b0;
     fpu_req_op       = FADD;
     fpu_req_a        = 64'd0;
     fpu_req_b        = 64'd0;
     fpu_req_c        = 64'd0;
+
+    // Default: shared FPU lane signals inactive
+    fe_fpu_req_v  = 1'b0;
+    fe_fpu_mode   = 3'd0;
+    fe_fpu_a0_re  = 64'd0; fe_fpu_a0_im = 64'd0;
+    fe_fpu_b0_re  = 64'd0; fe_fpu_b0_im = 64'd0;
+    fe_fpu_a1_re  = 64'd0; fe_fpu_a1_im = 64'd0;
+    fe_fpu_b1_re  = 64'd0; fe_fpu_b1_im = 64'd0;
+    fe_fpu_w_re   = 64'd0; fe_fpu_w_im  = 64'd0;
+    fe_fpu_w1_re  = 64'd0; fe_fpu_w1_im = 64'd0;
     sz_cmd_valid     = 1'b0;
     sz_cmd_mu        = 64'd0;
     sz_cmd_sigma_inv = 64'd0;
@@ -246,41 +350,40 @@ always @(*) begin
         end
 
         ST_FPU_REQ: begin
-            fpu_req_valid = 1'b1;
-            if ((op_q == OP_SPLIT) || (op_q == OP_MERGE)) begin
-                if (op_q == OP_SPLIT) begin
-                    case (phase_q)
-                        4'd0: begin fpu_req_op = FADD;  fpu_req_a = a_re_q;   fpu_req_b = b_re_q; end
-                        4'd1: begin fpu_req_op = FADD;  fpu_req_a = a_im_q;   fpu_req_b = b_im_q; end
-                        4'd2: begin fpu_req_op = FSUB;  fpu_req_a = a_re_q;   fpu_req_b = b_re_q; end
-                        4'd3: begin fpu_req_op = FSUB;  fpu_req_a = a_im_q;   fpu_req_b = b_im_q; end
-                        4'd4: begin fpu_req_op = FMUL;  fpu_req_a = diff_re_q; fpu_req_b = twiddle_re; end
-                        4'd5: begin fpu_req_op = FMADD; fpu_req_a = diff_im_q; fpu_req_b = twiddle_im; fpu_req_c = tmp_q; end
-                        4'd6: begin fpu_req_op = FMUL;  fpu_req_a = diff_im_q; fpu_req_b = twiddle_re; end
-                        default: begin fpu_req_op = FNMADD; fpu_req_a = diff_re_q; fpu_req_b = twiddle_im; fpu_req_c = tmp_q; end
-                    endcase
-                end else begin
-                    case (phase_q)
-                        4'd4: begin fpu_req_op = FMUL;  fpu_req_a = b_re_q; fpu_req_b = twiddle_re; end
-                        4'd5: begin fpu_req_op = FNMADD; fpu_req_a = b_im_q; fpu_req_b = twiddle_im; fpu_req_c = tmp_q; end
-                        4'd6: begin fpu_req_op = FMUL;  fpu_req_a = b_re_q; fpu_req_b = twiddle_im; end
-                        4'd7: begin fpu_req_op = FMADD; fpu_req_a = b_im_q; fpu_req_b = twiddle_re; fpu_req_c = tmp_q; end
-                        4'd8: begin fpu_req_op = FADD;  fpu_req_a = a_re_q; fpu_req_b = rot_re_q; end
-                        4'd9: begin fpu_req_op = FSUB;  fpu_req_a = a_re_q; fpu_req_b = rot_re_q; end
-                        4'd10: begin fpu_req_op = FADD; fpu_req_a = a_im_q; fpu_req_b = rot_im_q; end
-                        default: begin fpu_req_op = FSUB; fpu_req_a = a_im_q; fpu_req_b = rot_im_q; end
-                    endcase
-                end
-            end else begin
+            ife_req_valid = 1'b1;
+            if (op_q == OP_SPLIT) begin
                 case (phase_q)
-                    4'd0: begin fpu_req_op = FSUB;  fpu_req_a = t1_re_q; fpu_req_b = z1_re_q; end
-                    4'd1: begin fpu_req_op = FSUB;  fpu_req_a = t1_im_q; fpu_req_b = z1_im_q; end
-                    4'd2: begin fpu_req_op = FMUL;  fpu_req_a = diff_re_q; fpu_req_b = l_re_q; end
-                    4'd3: begin fpu_req_op = FNMADD; fpu_req_a = diff_im_q; fpu_req_b = l_im_q; fpu_req_c = tmp_q; end
-                    4'd4: begin fpu_req_op = FMUL;  fpu_req_a = diff_re_q; fpu_req_b = l_im_q; end
-                    4'd5: begin fpu_req_op = FMADD; fpu_req_a = diff_im_q; fpu_req_b = l_re_q; fpu_req_c = tmp_q; end
-                    4'd6: begin fpu_req_op = FADD;  fpu_req_a = t0_re_q; fpu_req_b = rot_re_q; end
-                    default: begin fpu_req_op = FADD; fpu_req_a = t0_im_q; fpu_req_b = rot_im_q; end
+                    4'd0: begin ife_req_op = FADD;  ife_req_a = a_re_q;   ife_req_b = b_re_q; end
+                    4'd1: begin ife_req_op = FADD;  ife_req_a = a_im_q;   ife_req_b = b_im_q; end
+                    4'd2: begin ife_req_op = FSUB;  ife_req_a = a_re_q;   ife_req_b = b_re_q; end
+                    4'd3: begin ife_req_op = FSUB;  ife_req_a = a_im_q;   ife_req_b = b_im_q; end
+                    4'd4: begin ife_req_op = FMUL;  ife_req_a = diff_re_q; ife_req_b = twiddle_re; end
+                    4'd5: begin ife_req_op = FMADD; ife_req_a = diff_im_q; ife_req_b = twiddle_im; ife_req_c = tmp_q; end
+                    4'd6: begin ife_req_op = FMUL;  ife_req_a = diff_im_q; ife_req_b = twiddle_re; end
+                    default: begin ife_req_op = FNMADD; ife_req_a = diff_re_q; ife_req_b = twiddle_im; ife_req_c = tmp_q; end
+                endcase
+            end else if (op_q == OP_MERGE) begin
+                case (phase_q)
+                    4'd4: begin ife_req_op = FMUL;  ife_req_a = b_re_q; ife_req_b = twiddle_re; end
+                    4'd5: begin ife_req_op = FNMADD; ife_req_a = b_im_q; ife_req_b = twiddle_im; ife_req_c = tmp_q; end
+                    4'd6: begin ife_req_op = FMUL;  ife_req_a = b_re_q; ife_req_b = twiddle_im; end
+                    4'd7: begin ife_req_op = FMADD; ife_req_a = b_im_q; ife_req_b = twiddle_re; ife_req_c = tmp_q; end
+                    4'd8: begin ife_req_op = FADD;  ife_req_a = a_re_q; ife_req_b = rot_re_q; end
+                    4'd9: begin ife_req_op = FSUB;  ife_req_a = a_re_q; ife_req_b = rot_re_q; end
+                    4'd10: begin ife_req_op = FADD; ife_req_a = a_im_q; ife_req_b = rot_im_q; end
+                    default: begin ife_req_op = FSUB; ife_req_a = a_im_q; ife_req_b = rot_im_q; end
+                endcase
+            end else begin
+                // ADJUST
+                case (phase_q)
+                    4'd0: begin ife_req_op = FSUB;  ife_req_a = t1_re_q; ife_req_b = z1_re_q; end
+                    4'd1: begin ife_req_op = FSUB;  ife_req_a = t1_im_q; ife_req_b = z1_im_q; end
+                    4'd2: begin ife_req_op = FMUL;  ife_req_a = diff_re_q; ife_req_b = l_re_q; end
+                    4'd3: begin ife_req_op = FNMADD; ife_req_a = diff_im_q; ife_req_b = l_im_q; ife_req_c = tmp_q; end
+                    4'd4: begin ife_req_op = FMUL;  ife_req_a = diff_re_q; ife_req_b = l_im_q; end
+                    4'd5: begin ife_req_op = FMADD; ife_req_a = diff_im_q; ife_req_b = l_re_q; ife_req_c = tmp_q; end
+                    4'd6: begin ife_req_op = FADD;  ife_req_a = t0_re_q; ife_req_b = rot_re_q; end
+                    default: begin ife_req_op = FADD; ife_req_a = t0_im_q; ife_req_b = rot_im_q; end
                 endcase
             end
         end
@@ -292,9 +395,7 @@ always @(*) begin
                 if (level_q >= 4'd8) begin
                     mem_wr_data = {192'd0, a_re_q};
                 end else begin
-                    mem_wr_data = {128'd0,
-                                   (sum_im_q[62:52] == 11'd0) ? sum_im_q : {sum_im_q[63], sum_im_q[62:52] - 1'b1, sum_im_q[51:0]},
-                                   (sum_re_q[62:52] == 11'd0) ? sum_re_q : {sum_re_q[63], sum_re_q[62:52] - 1'b1, sum_re_q[51:0]}};
+                    mem_wr_data = {128'd0, f64_half(sum_im_q), f64_half(sum_re_q)};
                 end
 `ifndef SYNTHESIS
                 if (debug_trace_exu && (op_q == OP_SPLIT) && (level_q <= 4'd1) && (idx_q < 2)) begin
@@ -319,9 +420,7 @@ always @(*) begin
                 if (level_q >= 4'd8) begin
                     mem_wr_data = {192'd0, a_im_q};
                 end else begin
-                    mem_wr_data = {128'd0,
-                                   (rot_im_q[62:52] == 11'd0) ? rot_im_q : {rot_im_q[63], rot_im_q[62:52] - 1'b1, rot_im_q[51:0]},
-                                   (rot_re_q[62:52] == 11'd0) ? rot_re_q : {rot_re_q[63], rot_re_q[62:52] - 1'b1, rot_re_q[51:0]}};
+                    mem_wr_data = {128'd0, f64_half(rot_im_q), f64_half(rot_re_q)};
                 end
 `ifndef SYNTHESIS
                 if (debug_trace_exu && (op_q == OP_SPLIT) && (level_q <= 4'd1) && (idx_q < 2)) begin
@@ -342,13 +441,13 @@ always @(*) begin
         ST_PAIR_MIR0: begin
             mem_wr_en   = 1'b1;
             mem_wr_addr = merge_mirror_addr0;
-            mem_wr_data = {128'd0, (out0_im_q[62:0] == 63'd0) ? out0_im_q : {~out0_im_q[63], out0_im_q[62:0]}, out0_re_q};
+            mem_wr_data = {128'd0, f64_neg(out0_im_q), out0_re_q};
         end
 
         ST_PAIR_MIR1: begin
             mem_wr_en   = 1'b1;
             mem_wr_addr = merge_mirror_addr1;
-            mem_wr_data = {128'd0, (out1_im_q[62:0] == 63'd0) ? out1_im_q : {~out1_im_q[63], out1_im_q[62:0]}, out1_re_q};
+            mem_wr_data = {128'd0, f64_neg(out1_im_q), out1_re_q};
         end
 
         ST_ADJ_WR: begin
@@ -365,7 +464,7 @@ always @(*) begin
         ST_ADJ_MIRROR_WR: begin
             mem_wr_en = 1'b1;
             mem_wr_addr = adj_mirror_addr;
-            mem_wr_data = {128'd0, (out0_im_q[62:0] == 63'd0) ? out0_im_q : {~out0_im_q[63], out0_im_q[62:0]}, out0_re_q};
+            mem_wr_data = {128'd0, f64_neg(out0_im_q), out0_re_q};
         end
 
         ST_SAMPLE_REQ: begin
@@ -453,8 +552,7 @@ always @(posedge clk or negedge rst_n) begin
                     src0_q       <= task_word[49:36];
                     src1_q       <= task_word[35:22];
                     dst_q        <= task_word[21:8];
-                    pair_limit_q <= (task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                               : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]));
+                    pair_limit_q <= pair_count_from_level(task_word[63:60]);
                     adj_root_full_q <= 1'b0;
                     idx_q        <= {ADDR_W{1'b0}};
                     lane_q       <= 3'd0;
@@ -465,8 +563,7 @@ always @(posedge clk or negedge rst_n) begin
                             if (task_word[63:60] >= 4'd8) begin
                                 state <= ST_PAIR_A_REQ;
                             end else begin
-                                split_words_q <= ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                          : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]))) << 1;
+                                split_words_q <= pair_count_from_level(task_word[63:60]) << 1;
                                 state         <= ST_SPLIT_PREF_REQ;
                             end
                         end
@@ -474,27 +571,21 @@ always @(posedge clk or negedge rst_n) begin
                             if (task_word[63:60] >= 4'd8) begin
                                 state <= ST_PAIR_A_REQ;
                             end else begin
-                                split_words_q <= ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                          : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]))) << 1;
+                                split_words_q <= pair_count_from_level(task_word[63:60]) << 1;
                                 state         <= ST_SPLIT_PREF_REQ;
                             end
                         end
                         OP_COPY: begin
-                            pair_limit_q <= (task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]));
+                            pair_limit_q <= pair_count_from_level(task_word[63:60]);
                             idx_q        <= {ADDR_W{1'b0}};
                             state        <= ST_COPY_REQ;
                         end
                         OP_ADJUST: begin
                             adj_root_full_q <= task_word[0];
-                            pair_limit_q <= task_word[0] ? ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - task_word[63:60])))
-                                                          : ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60])));
-                            l_half_q     <= task_word[0] ? ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - task_word[63:60])))
-                                                          : ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
-                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60])));
+                            pair_limit_q <= task_word[0] ? word_count_from_level(task_word[63:60])
+                                                          : pair_count_from_level(task_word[63:60]);
+                            l_half_q     <= task_word[0] ? word_count_from_level(task_word[63:60])
+                                                          : pair_count_from_level(task_word[63:60]);
                             l_base_q     <= task_word[35:22];
                             adj_t0_base_q <= {task_word[7:4], task_word[59:50]};
                             state        <= ST_ADJ_L_REQ;
@@ -527,8 +618,7 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_ADJ_L_CAP: begin
                 l_re_q <= mem_rd_data[63:0];
-                l_im_q <= adj_l_mirror ? ((mem_rd_data[126:64] == 63'd0) ? mem_rd_data[127:64] : {~mem_rd_data[127], mem_rd_data[126:64]})
-                                        : mem_rd_data[127:64];
+                l_im_q <= adj_l_mirror ? f64_neg(mem_rd_data[127:64]) : mem_rd_data[127:64];
                 state  <= ST_ADJ_T1_REQ;
             end
 
@@ -599,6 +689,7 @@ always @(posedge clk or negedge rst_n) begin
             end
 `endif
             if ((op_q == OP_MERGE) && (level_q >= 4'd8)) begin
+                // Scalar merge: pass-through (same as original behavior)
                 out0_re_q <= a_re_q;
                 out0_im_q <= mem_rd_data[63:0];
                 state     <= ST_PAIR_WR0;
@@ -663,50 +754,50 @@ always @(posedge clk or negedge rst_n) begin
             end
 
             ST_FPU_REQ: begin
-                if (fpu_req_ready) begin
+                if (ife_req_ready) begin
                     state <= ST_FPU_WAIT;
                 end
             end
 
             ST_FPU_WAIT: begin
-                if (fpu_rsp_valid) begin
+                if (ife_rsp_valid) begin
                     if (op_q == OP_SPLIT) begin
                         case (phase_q)
-                            4'd0: begin sum_re_q  <= fpu_rsp_result; phase_q <= 4'd1; state <= ST_FPU_REQ; end
-                            4'd1: begin sum_im_q  <= fpu_rsp_result; phase_q <= 4'd2; state <= ST_FPU_REQ; end
-                            4'd2: begin diff_re_q <= fpu_rsp_result; phase_q <= 4'd3; state <= ST_FPU_REQ; end
-                            4'd3: begin diff_im_q <= fpu_rsp_result; phase_q <= 4'd4; state <= ST_FPU_REQ; end
-                            4'd4: begin tmp_q     <= fpu_rsp_result; phase_q <= 4'd5; state <= ST_FPU_REQ; end
-                            4'd5: begin rot_re_q  <= fpu_rsp_result; phase_q <= 4'd6; state <= ST_FPU_REQ; end
-                            4'd6: begin tmp_q     <= fpu_rsp_result; phase_q <= 4'd7; state <= ST_FPU_REQ; end
-                            default: begin rot_im_q <= fpu_rsp_result; state <= ST_PAIR_WR0; end
+                            4'd0: begin sum_re_q  <= ife_rsp_result; phase_q <= 4'd1; state <= ST_FPU_REQ; end
+                            4'd1: begin sum_im_q  <= ife_rsp_result; phase_q <= 4'd2; state <= ST_FPU_REQ; end
+                            4'd2: begin diff_re_q <= ife_rsp_result; phase_q <= 4'd3; state <= ST_FPU_REQ; end
+                            4'd3: begin diff_im_q <= ife_rsp_result; phase_q <= 4'd4; state <= ST_FPU_REQ; end
+                            4'd4: begin tmp_q     <= ife_rsp_result; phase_q <= 4'd5; state <= ST_FPU_REQ; end
+                            4'd5: begin rot_re_q  <= ife_rsp_result; phase_q <= 4'd6; state <= ST_FPU_REQ; end
+                            4'd6: begin tmp_q     <= ife_rsp_result; phase_q <= 4'd7; state <= ST_FPU_REQ; end
+                            default: begin rot_im_q <= ife_rsp_result; state <= ST_PAIR_WR0; end
                         endcase
                     end else if (op_q == OP_MERGE) begin
                         case (phase_q)
-                            4'd4: begin tmp_q     <= fpu_rsp_result; phase_q <= 4'd5; state <= ST_FPU_REQ; end
-                            4'd5: begin rot_re_q  <= fpu_rsp_result; phase_q <= 4'd6; state <= ST_FPU_REQ; end
-                            4'd6: begin tmp_q     <= fpu_rsp_result; phase_q <= 4'd7; state <= ST_FPU_REQ; end
-                            4'd7: begin rot_im_q  <= fpu_rsp_result; phase_q <= 4'd8; state <= ST_FPU_REQ; end
-                            4'd8: begin out0_re_q <= fpu_rsp_result; phase_q <= 4'd9; state <= ST_FPU_REQ; end
-                            4'd9: begin out1_re_q <= fpu_rsp_result; phase_q <= 4'd10; state <= ST_FPU_REQ; end
-                            4'd10: begin out0_im_q <= fpu_rsp_result; phase_q <= 4'd11; state <= ST_FPU_REQ; end
-                            default: begin out1_im_q <= fpu_rsp_result; state <= ST_PAIR_WR0; end
+                            4'd4: begin tmp_q     <= ife_rsp_result; phase_q <= 4'd5; state <= ST_FPU_REQ; end
+                            4'd5: begin rot_re_q  <= ife_rsp_result; phase_q <= 4'd6; state <= ST_FPU_REQ; end
+                            4'd6: begin tmp_q     <= ife_rsp_result; phase_q <= 4'd7; state <= ST_FPU_REQ; end
+                            4'd7: begin rot_im_q  <= ife_rsp_result; phase_q <= 4'd8; state <= ST_FPU_REQ; end
+                            4'd8: begin out0_re_q <= ife_rsp_result; phase_q <= 4'd9; state <= ST_FPU_REQ; end
+                            4'd9: begin out1_re_q <= ife_rsp_result; phase_q <= 4'd10; state <= ST_FPU_REQ; end
+                            4'd10: begin out0_im_q <= ife_rsp_result; phase_q <= 4'd11; state <= ST_FPU_REQ; end
+                            default: begin out1_im_q <= ife_rsp_result; state <= ST_PAIR_WR0; end
                         endcase
                     end else begin
                         case (phase_q)
-                            4'd0: begin diff_re_q <= fpu_rsp_result; phase_q <= 4'd1; state <= ST_FPU_REQ; end
-                            4'd1: begin diff_im_q <= fpu_rsp_result; phase_q <= 4'd2; state <= ST_FPU_REQ; end
-                            4'd2: begin tmp_q     <= fpu_rsp_result; phase_q <= 4'd3; state <= ST_FPU_REQ; end
-                            4'd3: begin rot_re_q  <= fpu_rsp_result; phase_q <= 4'd4; state <= ST_FPU_REQ; end
-                            4'd4: begin tmp_q     <= fpu_rsp_result; phase_q <= 4'd5; state <= ST_FPU_REQ; end
-                            4'd5: begin rot_im_q  <= fpu_rsp_result; phase_q <= 4'd6; state <= ST_FPU_REQ; end
+                            4'd0: begin diff_re_q <= ife_rsp_result; phase_q <= 4'd1; state <= ST_FPU_REQ; end
+                            4'd1: begin diff_im_q <= ife_rsp_result; phase_q <= 4'd2; state <= ST_FPU_REQ; end
+                            4'd2: begin tmp_q     <= ife_rsp_result; phase_q <= 4'd3; state <= ST_FPU_REQ; end
+                            4'd3: begin rot_re_q  <= ife_rsp_result; phase_q <= 4'd4; state <= ST_FPU_REQ; end
+                            4'd4: begin tmp_q     <= ife_rsp_result; phase_q <= 4'd5; state <= ST_FPU_REQ; end
+                            4'd5: begin rot_im_q  <= ife_rsp_result; phase_q <= 4'd6; state <= ST_FPU_REQ; end
                             4'd6: begin
-                                out0_re_q <= fpu_rsp_result;
+                                out0_re_q <= ife_rsp_result;
                                 phase_q <= 4'd7;
                                 state <= ST_FPU_REQ;
                             end
                             default: begin
-                                out0_im_q <= fpu_rsp_result;
+                                out0_im_q <= ife_rsp_result;
                                 state <= ST_ADJ_WR;
                             end
                         endcase
@@ -716,7 +807,7 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_PAIR_WR0: begin
                 if ((op_q == OP_MERGE) && (level_q >= 4'd8)) begin
-                    state <= ST_DONE;
+                    state <= ST_DONE;   // scalar merge: skip WR1
                 end else if ((op_q == OP_MERGE) && (level_q == 4'd0)) begin
                     state <= ST_PAIR_MIR0;
                 end else begin

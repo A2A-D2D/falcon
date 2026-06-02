@@ -1,4 +1,8 @@
 `timescale 1ns/1ps
+// Module: falcon_f64_add
+// Purpose: combinational IEEE-754 double-precision add/subtract helper for
+// Falcon f64 datapaths.
+
 module falcon_f64_add (
     input      [63:0] a,
     input      [63:0] b,
@@ -56,6 +60,8 @@ module falcon_f64_add (
     reg [55:0] shift_value;
     reg [55:0] shift_tmp;
 
+    // Combinational f64 add/sub datapath: unpack, align, add/subtract,
+    // normalize, round-to-nearest-even, and repack.
     always @(*) begin
         sign_a = a[63];
         sign_b = b[63] ^ sub;

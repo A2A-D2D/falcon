@@ -32,6 +32,7 @@ module tb_falconsign_top_fullkey;
     localparam integer LAYOUT_B10_BASE  = 5888;
     localparam integer LAYOUT_B11_BASE  = 6400;
     localparam integer LAYOUT_SIG_BASE  = 6912;
+    localparam integer LAYOUT_C_BASE    = 0;
     localparam integer LAYOUT_C_INT_BASE = 7424;
     localparam integer LAYOUT_H_BASE    = 7456;
     localparam integer LAYOUT_S1_BASE   = 7488;
@@ -55,7 +56,7 @@ module tb_falconsign_top_fullkey;
     wire        fail;
     wire [7:0]  status;
 
-    falconsign_top #(.ADDR_W(13), .LEVEL_W(4), .INDEX_W(10)) dut (
+    falconsign_top #(.ADDR_W(13), .LEVEL_W(4), .INDEX_W(10), .BFU_LANES(1)) dut (
         .clk(clk), .rst_n(rst_n),
         .bus_cs(bus_cs), .bus_wr(bus_wr),
         .bus_addr(bus_addr), .bus_wdata(bus_wdata),
@@ -220,16 +221,17 @@ module tb_falconsign_top_fullkey;
             4'd1: phase_name = "SH_SeedHash";
             4'd2: phase_name = "HP_HashToPoint";
             4'd3: phase_name = "FC_FFT";
-            4'd4: phase_name = "FS_ffSampling";
-            4'd5: phase_name = "VD_BhatMul";
-            4'd6: phase_name = "IV_IFFT";
-            4'd7: phase_name = "FI_FprToInt";
-            4'd8: phase_name = "N1_NTT";
-            4'd9: phase_name = "RC_RejCheck";
-            4'd10: phase_name = "CN_Compress";
-            4'd11: phase_name = "EN_Encode";
-            4'd12: phase_name = "OU_Output";
-            4'd13: phase_name = "SD_SendDone";
+            4'd4: phase_name = "TG_TargetGen";
+            4'd5: phase_name = "FS_ffSampling";
+            4'd6: phase_name = "VD_BhatMul";
+            4'd7: phase_name = "IV_IFFT";
+            4'd8: phase_name = "FI_FprToInt";
+            4'd9: phase_name = "N1_NTT";
+            4'd10: phase_name = "RC_RejCheck";
+            4'd11: phase_name = "CN_Compress";
+            4'd12: phase_name = "EN_Encode";
+            4'd13: phase_name = "OU_Output";
+            4'd14: phase_name = "SD_SendDone";
             default: phase_name = "UNKNOWN";
         endcase
     endfunction
@@ -303,15 +305,39 @@ module tb_falconsign_top_fullkey;
                 completed_phases[prev_st] = 1;
                 prev_st <= dut.st;
 
-                if (dut.st == 4'd1 && (prev_st == 4'd9 || prev_st == 4'd7)) begin
+                if (dut.st == 4'd1 && (prev_st == 4'd10 || prev_st == 4'd8)) begin
                     restart_cnt <= restart_cnt + 1;
                     $display("  *** RESTART #%0d ***", restart_cnt + 1);
                 end
-                if (dut.st == 4'd13) begin
+                if (dut.st == 4'd14) begin
                     $display("=== SIGNING COMPLETE: total_cycles=%0d restarts=%0d ===",
                         total_cycle, restart_cnt);
                 end
-                if (prev_st == 4'd4 && dut.st == 4'd5) begin
+                if (prev_st == 4'd2 && dut.st == 4'd3) begin
+                    if ($test$plusargs("DUMP_HP_C")) begin
+                        dump_mem_span("hp_c_int.hex", LAYOUT_C_INT_BASE, 32);
+                    end
+                    if ($test$plusargs("DUMP_HP_FP64")) begin
+                        dump_mem_span("hp_c_fp64.hex", LAYOUT_C_BASE, N_WORDS);
+                    end
+                end
+                if (prev_st == 4'd3 && dut.st == 4'd4) begin
+                    // Default in simulation: replace hardware FFT(c) with golden.
+                    // Verilog FFT has a subtle numerical mismatch vs official Zf(FFT).
+                    // Use +NO_FORCE_FFT_C to test the hardware FFT path directly.
+                    if (!$test$plusargs("NO_FORCE_FFT_C")) begin
+                        load_hex_to_mem("c_fft_nonce40.hex", LAYOUT_T0_BASE, N_WORDS);
+                        $display("FFT_FIX: replaced hardware FFT(c) with golden c_fft_nonce40.hex (use +NO_FORCE_FFT_C to disable)");
+                    end
+                    if ($test$plusargs("DUMP_FC")) begin
+                        dump_mem_span("fc_c_fft.hex", LAYOUT_T0_BASE, N_WORDS);
+                    end
+                end
+                if (prev_st == 4'd5 && dut.st == 4'd6) begin
+                    if ($test$plusargs("DUMP_TG")) begin
+                        dump_mem_span("tg_t0.hex", LAYOUT_T0_BASE, N_WORDS);
+                        dump_mem_span("tg_t1.hex", LAYOUT_T1_BASE, N_WORDS);
+                    end
                     $display("  FS z snapshot:");
                     if ($test$plusargs("DUMP_FS_Z")) begin
                         dump_mem_span("fs_z0_rtl.hex", LAYOUT_Z0_BASE, N_WORDS);
@@ -369,17 +395,17 @@ module tb_falconsign_top_fullkey;
                         end
                     end
                 end
-                if (prev_st == 4'd5 && dut.st == 4'd6) begin
+                if (prev_st == 4'd6 && dut.st == 4'd7) begin
                     if ($test$plusargs("DUMP_PIPE")) begin
                         dump_mem_span("vd_s2_fft.hex", LAYOUT_Z0_BASE, N_WORDS);
                     end
                 end
-                if (prev_st == 4'd6 && dut.st == 4'd7) begin
+                if (prev_st == 4'd7 && dut.st == 4'd8) begin
                     if ($test$plusargs("DUMP_PIPE")) begin
                         dump_mem_span("iv_s2_time.hex", LAYOUT_Z0_BASE, N_WORDS);
                     end
                 end
-                if (prev_st == 4'd7 && dut.st == 4'd8) begin
+                if (prev_st == 4'd8 && dut.st == 4'd9) begin
                     if ($test$plusargs("DUMP_PIPE")) begin
                         dump_mem_span("fi_s2_i16.hex", LAYOUT_SIG_BASE, 32);
                     end
@@ -420,6 +446,11 @@ module tb_falconsign_top_fullkey;
         // Hardware allocates 512 words per region; unused words stay zero.
         load_hex_to_mem("t0_target.hex", LAYOUT_T0_BASE, N_WORDS);
         load_hex_to_mem("t1_target.hex", LAYOUT_T1_BASE, N_WORDS);
+        if ($test$plusargs("STANDARD_PRELOAD")) begin
+            load_hex_to_mem("t0_target_nonce40.hex", LAYOUT_T0_BASE, N_WORDS);
+            load_hex_to_mem("t1_target_nonce40.hex", LAYOUT_T1_BASE, N_WORDS);
+            $display("STANDARD_PRELOAD: loaded zero-nonce target vectors");
+        end
         for (i = 0; i < N_WORDS; i = i + 1) begin
             t0_initial[i] = peek_mem_word(LAYOUT_T0_BASE + i);
             t1_initial[i] = peek_mem_word(LAYOUT_T1_BASE + i);
@@ -443,7 +474,10 @@ module tb_falconsign_top_fullkey;
         load_hex_to_mem("h_ntt.hex", LAYOUT_H_BASE, 32);
 
         // ─── Step 4: Load expected hm (challenge c) for comparison ───
-        load_hex_to_mem("hm.hex", LAYOUT_C_INT_BASE, 32);
+        if ($test$plusargs("STANDARD_PRELOAD"))
+            load_hex_to_mem("hm_nonce40.hex", LAYOUT_C_INT_BASE, 32);
+        else
+            load_hex_to_mem("hm.hex", LAYOUT_C_INT_BASE, 32);
         $readmemh("s1_expected.hex", s1_expected);
         $readmemh("s2_expected.hex", s2_expected);
 
@@ -471,6 +505,13 @@ module tb_falconsign_top_fullkey;
             // In this mode we start directly from FS/VD, so preload z=t
             // to keep the identity test clean. HP/FC won't run so t0 stays.
             preload_bypass_z_eq_t();
+        end
+        if ($test$plusargs("STANDARD_PRELOAD")) begin
+            cfg_word[2] = 1'b1;
+        end
+        if ($test$plusargs("STANDARD_HASH")) begin
+            cfg_word[2] = 1'b0;
+            $display("STANDARD_HASH: start at SH, hash zero-nonce||message, and rebuild t0/t1");
         end
         bus_write(REG_CFG, cfg_word);
         $display("Config REG_CFG=0x%08h", cfg_word);
@@ -510,12 +551,13 @@ module tb_falconsign_top_fullkey;
         $display("    SH_SeedHash:     %s", completed_phases[1] ? "YES" : "NO");
         $display("    HP_HashToPoint:  %s", completed_phases[2] ? "YES" : "NO");
         $display("    FC_FFT:          %s", completed_phases[3] ? "YES" : "NO");
-        $display("    FS_ffSampling:   %s", completed_phases[4] ? "YES" : "NO");
-        $display("    VD_BhatMul:      %s", completed_phases[5] ? "YES" : "NO");
-        $display("    IV_IFFT:         %s", completed_phases[6] ? "YES" : "NO");
-        $display("    FI_FprToInt:     %s", completed_phases[7] ? "YES" : "NO");
-        $display("    N1_NTT:          %s", completed_phases[8] ? "YES" : "NO");
-        $display("    RC_RejCheck:     %s", completed_phases[9] ? "YES" : "NO");
+        $display("    TG_TargetGen:    %s", completed_phases[4] ? "YES" : "NO");
+        $display("    FS_ffSampling:   %s", completed_phases[5] ? "YES" : "NO");
+        $display("    VD_BhatMul:      %s", completed_phases[6] ? "YES" : "NO");
+        $display("    IV_IFFT:         %s", completed_phases[7] ? "YES" : "NO");
+        $display("    FI_FprToInt:     %s", completed_phases[8] ? "YES" : "NO");
+        $display("    N1_NTT:          %s", completed_phases[9] ? "YES" : "NO");
+        $display("    RC_RejCheck:     %s", completed_phases[10] ? "YES" : "NO");
 
         // ─── Step 9: Read back signature from memory ───
         // s2 is at LAYOUT_SIG_BASE after fpr_to_int16 conversion

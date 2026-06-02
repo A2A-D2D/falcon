@@ -1,4 +1,7 @@
 `timescale 1ns/1ps
+// Module: falconsign_twiddle_rom
+// Purpose: f64 FFT twiddle ROM for the Falcon transform datapath.
+//
 
 module falconsign_twiddle_rom #(
     parameter ADDR_W = 8,
@@ -16,6 +19,7 @@ module falconsign_twiddle_rom #(
     reg [1023:0] rom_re_path;
     reg [1023:0] rom_im_path;
 
+    // ROM contents are loaded from the generated f64 FFT twiddle hex files.
     initial begin
         rom_re_path = "DOC/twiddle_rom_re.hex";
         rom_im_path = "DOC/twiddle_rom_im.hex";
